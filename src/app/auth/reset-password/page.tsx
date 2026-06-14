@@ -15,16 +15,23 @@ export default function ResetPasswordPage() {
   const [sessionReady, setSessionReady] = useState(false);
   const [done, setDone] = useState(false);
 
-  // Supabase sends the user back with a hash fragment containing the access token.
-  // The @supabase/ssr client automatically exchanges it for a session on load.
   useEffect(() => {
-    const { data: listener } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'PASSWORD_RECOVERY') {
+    const supabase = createClient();
+
+    // Set up the listener FIRST so we don't miss the PASSWORD_RECOVERY event.
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY' || session) {
         setSessionReady(true);
       }
     });
-    return () => listener.subscription.unsubscribe();
-  }, [supabase]);
+
+    // Fallback: a session may already exist by the time this runs.
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) setSessionReady(true);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
