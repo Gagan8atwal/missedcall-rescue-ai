@@ -36,7 +36,13 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Public routes that don't require authentication
-  const publicRoutes = ['/auth/login', '/auth/signup', '/api/webhooks/twilio'];
+  const publicRoutes = [
+    '/auth/login',
+    '/auth/signup',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+    '/api/webhooks/twilio',
+  ];
   const isPublic = publicRoutes.some((route) => pathname.startsWith(route));
 
   // Redirect unauthenticated users to login
