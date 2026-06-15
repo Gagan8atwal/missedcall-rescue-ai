@@ -5,44 +5,31 @@ import { sendAutoReplySMS } from '@/lib/twilio/sms';
 import { startAIConversation } from '@/lib/openai/qualify';
 
 /**
- * Returns a guaranteed-valid absolute URL for Twilio signature validation.
+ * Reconstructs the exact URL Twilio signed, using the forwarded headers that
+ * Vercel's edge proxy sets on every inbound request.
  *
- * Priority order:
- *   1. TWILIO_WEBHOOK_URL  – explicit override, must be a full URL
- *   2. NEXT_PUBLIC_APP_URL – base domain, we append the webhook path
- *   3. Hard-coded production fallback
+ * Headers used (in priority order):
+ *   1. x-forwarded-proto  – the original scheme ("https")
+ *   2. x-forwarded-host   – the original public hostname
+ *   3. host               – fallback hostname if x-forwarded-host is absent
  *
- * Any value that is empty, undefined, or missing "https://" is rejected and
- * the next candidate is tried, so new URL() never throws.
+ * The path + query string come from req.nextUrl so they are always accurate.
+ *
+ * This approach is robust across Vercel preview URLs, custom domains, and
+ * any future domain changes — because it mirrors exactly what Twilio saw
+ * when it signed the request.
  */
-function getWebhookUrl(): string {
-  const FALLBACK = 'https://missedcall-rescue-ai.vercel.app/api/webhooks/twilio';
-  const WEBHOOK_PATH = '/api/webhooks/twilio';
+function reconstructTwilioUrl(req: NextRequest): string {
+  const proto =
+    req.headers.get('x-forwarded-proto')?.split(',')[0].trim() ?? 'https';
+  const host =
+    req.headers.get('x-forwarded-host')?.split(',')[0].trim() ??
+    req.headers.get('host') ??
+    'missedcall-rescue-ai.vercel.app';
 
-  // Candidate 1: explicit TWILIO_WEBHOOK_URL
-  const explicit = process.env.TWILIO_WEBHOOK_URL ?? '';
-  if (explicit && explicit.startsWith('https://')) {
-    try {
-      new URL(explicit); // validate
-      return explicit;
-    } catch {
-      // fall through
-    }
-  }
-
-  // Candidate 2: NEXT_PUBLIC_APP_URL + webhook path
-  const base = process.env.NEXT_PUBLIC_APP_URL ?? '';
-  if (base) {
-    const normalised = base.startsWith('https://') ? base : `https://${base}`;
-    try {
-      const constructed = new URL(WEBHOOK_PATH, normalised).toString();
-      return constructed;
-    } catch {
-      // fall through
-    }
-  }
-
-  return FALLBACK;
+  // Include path and any query string exactly as Twilio sent them.
+  const { pathname, search } = req.nextUrl;
+  return `${proto}://${host}${pathname}${search}`;
 }
 
 /**
@@ -53,22 +40,35 @@ function getWebhookUrl(): string {
  *   2. Incoming SMS → continue AI qualification conversation
  */
 export async function POST(req: NextRequest) {
-  // Validate Twilio signature in production
-  const twilioSignature = req.headers.get('x-twilio-signature') ?? '';
-  const webhookUrl = getWebhookUrl();
   const bodyText = await req.text();
   const params = Object.fromEntries(new URLSearchParams(bodyText));
 
-  const isValid = twilio.validateRequest(
-    process.env.TWILIO_AUTH_TOKEN ?? '',
-    twilioSignature,
-    webhookUrl,
-    params
-  );
+  // ── Signature validation ──────────────────────────────────────────────────
+  const skipValidation = process.env.TWILIO_VALIDATE_SIGNATURE === 'false';
 
-  if (!isValid && process.env.NODE_ENV === 'production') {
-    return NextResponse.json({ error: 'Invalid Twilio signature' }, { status: 403 });
+  if (!skipValidation) {
+    const twilioSignature = req.headers.get('x-twilio-signature') ?? '';
+    const authToken = process.env.TWILIO_AUTH_TOKEN ?? '';
+    const validationUrl = reconstructTwilioUrl(req);
+
+    const isValid = twilio.validateRequest(
+      authToken,
+      twilioSignature,
+      validationUrl,
+      params
+    );
+
+    if (!isValid) {
+      // Log enough to debug without exposing the auth token.
+      console.error('[Twilio] Signature validation failed', {
+        reconstructedUrl: validationUrl,
+        receivedSignature: twilioSignature,
+        // authToken intentionally omitted
+      });
+      return NextResponse.json({ error: 'Invalid Twilio signature' }, { status: 403 });
+    }
   }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const callStatus = params['CallStatus'];
   const callSid = params['CallSid'];
@@ -115,7 +115,7 @@ async function handleMissedCall({
     .single();
 
   if (bizError || !business) {
-    console.error(`No business found for Twilio number: ${to}`);
+    console.error(`[Twilio] No business found for number: ${to}`);
     return NextResponse.json({ error: 'Business not found' }, { status: 404 });
   }
 
@@ -130,7 +130,7 @@ async function handleMissedCall({
     .single();
 
   if (leadError || !lead) {
-    console.error('Failed to upsert lead:', leadError);
+    console.error('[Twilio] Failed to upsert lead:', leadError);
     return NextResponse.json({ error: 'Failed to create lead' }, { status: 500 });
   }
 
@@ -147,20 +147,20 @@ async function handleMissedCall({
     await sendAutoReplySMS({
       to: from,
       from: to,
-      body: business.auto_reply_message ?? 'Sorry we missed your call! How can we help you today?',
+      body:
+        business.auto_reply_message ??
+        'Sorry we missed your call! How can we help you today?',
       businessId: business.id,
       leadId: lead.id,
-      accountSid: business.twilio_account_sid ?? process.env.TWILIO_ACCOUNT_SID ?? '',
-      authToken: business.twilio_auth_token ?? process.env.TWILIO_AUTH_TOKEN ?? '',
+      accountSid:
+        business.twilio_account_sid ?? process.env.TWILIO_ACCOUNT_SID ?? '',
+      authToken:
+        business.twilio_auth_token ?? process.env.TWILIO_AUTH_TOKEN ?? '',
     });
 
     // If AI qualification is enabled, start the conversation
     if (business.ai_qualification_enabled) {
-      await startAIConversation({
-        business,
-        lead,
-        userMessage: null,
-      });
+      await startAIConversation({ business, lead, userMessage: null });
     }
   }
 
