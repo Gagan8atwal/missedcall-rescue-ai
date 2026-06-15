@@ -18,14 +18,23 @@ export default function ResetPasswordPage() {
   useEffect(() => {
     const supabase = createClient();
 
-    // Set up the listener FIRST so we don't miss the PASSWORD_RECOVERY event.
+    // Listener first — catches the hash/event style link.
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY' || session) {
         setSessionReady(true);
       }
     });
 
-    // Fallback: a session may already exist by the time this runs.
+    // Handle the ?code= style link (newer Supabase): exchange it for a session.
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get('code');
+    if (code) {
+      supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
+        if (!error) setSessionReady(true);
+      });
+    }
+
+    // Fallback: a session may already exist on load.
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) setSessionReady(true);
     });
