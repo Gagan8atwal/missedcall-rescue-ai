@@ -5,6 +5,47 @@ import { sendAutoReplySMS } from '@/lib/twilio/sms';
 import { startAIConversation } from '@/lib/openai/qualify';
 
 /**
+ * Returns a guaranteed-valid absolute URL for Twilio signature validation.
+ *
+ * Priority order:
+ *   1. TWILIO_WEBHOOK_URL  – explicit override, must be a full URL
+ *   2. NEXT_PUBLIC_APP_URL – base domain, we append the webhook path
+ *   3. Hard-coded production fallback
+ *
+ * Any value that is empty, undefined, or missing "https://" is rejected and
+ * the next candidate is tried, so new URL() never throws.
+ */
+function getWebhookUrl(): string {
+  const FALLBACK = 'https://missedcall-rescue-ai.vercel.app/api/webhooks/twilio';
+  const WEBHOOK_PATH = '/api/webhooks/twilio';
+
+  // Candidate 1: explicit TWILIO_WEBHOOK_URL
+  const explicit = process.env.TWILIO_WEBHOOK_URL ?? '';
+  if (explicit && explicit.startsWith('https://')) {
+    try {
+      new URL(explicit); // validate
+      return explicit;
+    } catch {
+      // fall through
+    }
+  }
+
+  // Candidate 2: NEXT_PUBLIC_APP_URL + webhook path
+  const base = process.env.NEXT_PUBLIC_APP_URL ?? '';
+  if (base) {
+    const normalised = base.startsWith('https://') ? base : `https://${base}`;
+    try {
+      const constructed = new URL(WEBHOOK_PATH, normalised).toString();
+      return constructed;
+    } catch {
+      // fall through
+    }
+  }
+
+  return FALLBACK;
+}
+
+/**
  * POST /api/webhooks/twilio
  *
  * Handles two types of Twilio webhooks:
@@ -14,14 +55,14 @@ import { startAIConversation } from '@/lib/openai/qualify';
 export async function POST(req: NextRequest) {
   // Validate Twilio signature in production
   const twilioSignature = req.headers.get('x-twilio-signature') ?? '';
-  const url = process.env.TWILIO_WEBHOOK_URL!;
+  const webhookUrl = getWebhookUrl();
   const bodyText = await req.text();
   const params = Object.fromEntries(new URLSearchParams(bodyText));
 
   const isValid = twilio.validateRequest(
-    process.env.TWILIO_AUTH_TOKEN!,
+    process.env.TWILIO_AUTH_TOKEN ?? '',
     twilioSignature,
-    url,
+    webhookUrl,
     params
   );
 
@@ -109,8 +150,8 @@ async function handleMissedCall({
       body: business.auto_reply_message ?? 'Sorry we missed your call! How can we help you today?',
       businessId: business.id,
       leadId: lead.id,
-      accountSid: business.twilio_account_sid ?? process.env.TWILIO_ACCOUNT_SID!,
-      authToken: business.twilio_auth_token ?? process.env.TWILIO_AUTH_TOKEN!,
+      accountSid: business.twilio_account_sid ?? process.env.TWILIO_ACCOUNT_SID ?? '',
+      authToken: business.twilio_auth_token ?? process.env.TWILIO_AUTH_TOKEN ?? '',
     });
 
     // If AI qualification is enabled, start the conversation
