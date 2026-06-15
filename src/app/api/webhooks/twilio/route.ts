@@ -12,12 +12,6 @@ import { startAIConversation } from '@/lib/openai/qualify';
  *   1. x-forwarded-proto  – the original scheme ("https")
  *   2. x-forwarded-host   – the original public hostname
  *   3. host               – fallback hostname if x-forwarded-host is absent
- *
- * The path + query string come from req.nextUrl so they are always accurate.
- *
- * This approach is robust across Vercel preview URLs, custom domains, and
- * any future domain changes — because it mirrors exactly what Twilio saw
- * when it signed the request.
  */
 function reconstructTwilioUrl(req: NextRequest): string {
   const proto =
@@ -26,8 +20,6 @@ function reconstructTwilioUrl(req: NextRequest): string {
     req.headers.get('x-forwarded-host')?.split(',')[0].trim() ??
     req.headers.get('host') ??
     'missedcall-rescue-ai.vercel.app';
-
-  // Include path and any query string exactly as Twilio sent them.
   const { pathname, search } = req.nextUrl;
   return `${proto}://${host}${pathname}${search}`;
 }
@@ -40,6 +32,8 @@ function reconstructTwilioUrl(req: NextRequest): string {
  *   2. Incoming SMS → continue AI qualification conversation
  */
 export async function POST(req: NextRequest) {
+  console.log('[Twilio webhook] POST received');
+
   const bodyText = await req.text();
   const params = Object.fromEntries(new URLSearchParams(bodyText));
 
@@ -59,11 +53,9 @@ export async function POST(req: NextRequest) {
     );
 
     if (!isValid) {
-      // Log enough to debug without exposing the auth token.
       console.error('[Twilio] Signature validation failed', {
         reconstructedUrl: validationUrl,
         receivedSignature: twilioSignature,
-        // authToken intentionally omitted
       });
       return NextResponse.json({ error: 'Invalid Twilio signature' }, { status: 403 });
     }
@@ -74,10 +66,19 @@ export async function POST(req: NextRequest) {
   const callSid = params['CallSid'];
   const from = params['From'] ?? '';
   const to = params['To'] ?? '';
-  const bodyParam = params['Body']; // Present for SMS webhooks
+  const bodyParam = params['Body'];
+
+  console.log('[Twilio webhook] params', {
+    callStatus,
+    callSid: callSid ?? '(none)',
+    from,
+    to,
+    hasBody: !!bodyParam,
+  });
 
   // --- Handle incoming SMS (AI conversation continuation) ---
   if (bodyParam && !callSid) {
+    console.log('[Twilio webhook] routing to handleIncomingSMS');
     return handleIncomingSMS({ from, to, body: bodyParam });
   }
 
@@ -87,10 +88,12 @@ export async function POST(req: NextRequest) {
     callStatus === 'busy' ||
     callStatus === 'failed'
   ) {
+    console.log('[Twilio webhook] routing to handleMissedCall, status:', callStatus);
     return handleMissedCall({ callSid: callSid ?? '', from, to });
   }
 
-  // Return empty TwiML for other call statuses
+  // Any other call status (ringing, completed, etc.) — acknowledge and exit.
+  console.log('[Twilio webhook] unhandled callStatus, returning empty TwiML:', callStatus);
   return new NextResponse('<Response></Response>', {
     headers: { 'Content-Type': 'text/xml' },
   });
@@ -105,21 +108,49 @@ async function handleMissedCall({
   from: string;
   to: string;
 }) {
+  console.log('[handleMissedCall] start — from:', from, 'to:', to);
   const supabase = createAdminClient();
 
-  // Find the business by Twilio phone number
-  const { data: business, error: bizError } = await supabase
+  // ── Business lookup ───────────────────────────────────────────────────────
+  // Primary: match by the Twilio number that received the call (the To field).
+  let { data: business, error: bizError } = await supabase
     .from('businesses')
     .select('*')
     .eq('twilio_phone_number', to)
     .single();
 
   if (bizError || !business) {
-    console.error(`[Twilio] No business found for number: ${to}`);
-    return NextResponse.json({ error: 'Business not found' }, { status: 404 });
-  }
+    console.warn(
+      `[handleMissedCall] No business matched twilio_phone_number="${to}" — attempting single-business fallback`
+    );
 
-  // Upsert lead (avoid duplicates for the same phone number)
+    // Fallback: if there is exactly one business in the account, use it.
+    const { data: allBusinesses, error: allBizError } = await supabase
+      .from('businesses')
+      .select('*');
+
+    if (allBizError) {
+      console.error('[handleMissedCall] Error fetching all businesses:', allBizError);
+      return NextResponse.json({ error: 'Database error' }, { status: 500 });
+    }
+
+    if (allBusinesses && allBusinesses.length === 1) {
+      business = allBusinesses[0];
+      console.log(
+        '[handleMissedCall] Fallback: using sole business id:', business.id
+      );
+    } else {
+      console.error(
+        `[handleMissedCall] Cannot resolve business — ${allBusinesses?.length ?? 0} businesses found, none match "${to}"`
+      );
+      return NextResponse.json({ error: 'Business not found' }, { status: 404 });
+    }
+  } else {
+    console.log('[handleMissedCall] Business matched by number, id:', business.id);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Upsert lead ───────────────────────────────────────────────────────────
   const { data: lead, error: leadError } = await supabase
     .from('leads')
     .upsert(
@@ -130,20 +161,31 @@ async function handleMissedCall({
     .single();
 
   if (leadError || !lead) {
-    console.error('[Twilio] Failed to upsert lead:', leadError);
+    console.error('[handleMissedCall] Failed to upsert lead:', leadError);
     return NextResponse.json({ error: 'Failed to create lead' }, { status: 500 });
   }
+  console.log('[handleMissedCall] Lead upserted, id:', lead.id);
+  // ─────────────────────────────────────────────────────────────────────────
 
-  // Log the missed call
-  await supabase.from('calls').insert({
+  // ── Insert call log ───────────────────────────────────────────────────────
+  const { error: callInsertError } = await supabase.from('calls').insert({
     business_id: business.id,
     lead_id: lead.id,
     twilio_call_sid: callSid,
     status: 'missed',
   });
 
-  // Send auto-reply SMS if enabled
+  if (callInsertError) {
+    console.error('[handleMissedCall] Failed to insert call row:', callInsertError);
+    // Non-fatal — continue so the lead still gets the SMS.
+  } else {
+    console.log('[handleMissedCall] Call row inserted');
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Auto-reply SMS ────────────────────────────────────────────────────────
   if (business.auto_reply_enabled) {
+    console.log('[handleMissedCall] Sending auto-reply SMS to:', from);
     await sendAutoReplySMS({
       to: from,
       from: to,
@@ -158,12 +200,16 @@ async function handleMissedCall({
         business.twilio_auth_token ?? process.env.TWILIO_AUTH_TOKEN ?? '',
     });
 
-    // If AI qualification is enabled, start the conversation
     if (business.ai_qualification_enabled) {
+      console.log('[handleMissedCall] Starting AI qualification');
       await startAIConversation({ business, lead, userMessage: null });
     }
+  } else {
+    console.log('[handleMissedCall] auto_reply_enabled=false, skipping SMS');
   }
+  // ─────────────────────────────────────────────────────────────────────────
 
+  console.log('[handleMissedCall] done — returning 200 TwiML');
   return new NextResponse('<Response></Response>', {
     headers: { 'Content-Type': 'text/xml' },
   });
@@ -178,22 +224,33 @@ async function handleIncomingSMS({
   to: string;
   body: string;
 }) {
+  console.log('[handleIncomingSMS] start — from:', from, 'to:', to);
   const supabase = createAdminClient();
 
-  // Find the business by Twilio phone number
-  const { data: business, error: bizError } = await supabase
+  // ── Business lookup ───────────────────────────────────────────────────────
+  let { data: business, error: bizError } = await supabase
     .from('businesses')
     .select('*')
     .eq('twilio_phone_number', to)
     .single();
 
   if (bizError || !business) {
-    return new NextResponse('<Response></Response>', {
-      headers: { 'Content-Type': 'text/xml' },
-    });
+    console.warn(
+      `[handleIncomingSMS] No business matched "${to}" — attempting single-business fallback`
+    );
+    const { data: allBusinesses } = await supabase.from('businesses').select('*');
+    if (allBusinesses && allBusinesses.length === 1) {
+      business = allBusinesses[0];
+    } else {
+      console.error('[handleIncomingSMS] Cannot resolve business, dropping SMS');
+      return new NextResponse('<Response></Response>', {
+        headers: { 'Content-Type': 'text/xml' },
+      });
+    }
   }
+  // ─────────────────────────────────────────────────────────────────────────
 
-  // Find or create the lead
+  // ── Upsert lead ───────────────────────────────────────────────────────────
   const { data: lead, error: leadError } = await supabase
     .from('leads')
     .upsert(
@@ -204,24 +261,35 @@ async function handleIncomingSMS({
     .single();
 
   if (leadError || !lead) {
+    console.error('[handleIncomingSMS] Failed to upsert lead:', leadError);
     return new NextResponse('<Response></Response>', {
       headers: { 'Content-Type': 'text/xml' },
     });
   }
+  console.log('[handleIncomingSMS] Lead upserted, id:', lead.id);
+  // ─────────────────────────────────────────────────────────────────────────
 
-  // Store the inbound message
-  await supabase.from('messages').insert({
+  // ── Store inbound message ─────────────────────────────────────────────────
+  const { error: msgError } = await supabase.from('messages').insert({
     lead_id: lead.id,
     business_id: business.id,
     direction: 'inbound',
     content: body,
   });
 
-  // Continue AI conversation if enabled
+  if (msgError) {
+    console.error('[handleIncomingSMS] Failed to insert message:', msgError);
+  } else {
+    console.log('[handleIncomingSMS] Inbound message stored');
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   if (business.ai_qualification_enabled) {
+    console.log('[handleIncomingSMS] Continuing AI conversation');
     await startAIConversation({ business, lead, userMessage: body });
   }
 
+  console.log('[handleIncomingSMS] done — returning 200 TwiML');
   return new NextResponse('<Response></Response>', {
     headers: { 'Content-Type': 'text/xml' },
   });
