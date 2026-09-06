@@ -15,11 +15,12 @@ concurrency:
 
 jobs:
   windows-gate:
-    name: Windows source gate
+    name: Windows source and build gate
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 30
     env:
       TARGET_SHA: ${{ github.sha }}
+      NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout exact commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,10 +34,16 @@ jobs:
         shell: pwsh
         run: |
           $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "git rev-parse failed with exit code $LASTEXITCODE"
+          }
           if ($actual -ne $env:TARGET_SHA) {
             throw "Expected $env:TARGET_SHA but checked out $actual"
           }
           $dirty = git status --porcelain
+          if ($LASTEXITCODE -ne 0) {
+            throw "git status failed with exit code $LASTEXITCODE"
+          }
           if ($dirty) {
             throw "Checkout is not clean: $dirty"
           }
@@ -51,25 +58,54 @@ jobs:
         shell: pwsh
         run: |
           node --version
-          npm --version
+          if ($LASTEXITCODE -ne 0) { throw "node --version failed with exit code $LASTEXITCODE" }
+          npm.cmd --version
+          if ($LASTEXITCODE -ne 0) { throw "npm.cmd --version failed with exit code $LASTEXITCODE" }
           git --version
+          if ($LASTEXITCODE -ne 0) { throw "git --version failed with exit code $LASTEXITCODE" }
 
       - name: Install locked dependencies without lifecycle scripts
         shell: pwsh
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: |
+          npm.cmd ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
 
       - name: Type-check
         shell: pwsh
-        run: npm run type-check
+        run: |
+          npm.cmd run type-check
+          if ($LASTEXITCODE -ne 0) { throw "Type-check failed with exit code $LASTEXITCODE" }
 
       - name: Lint
         shell: pwsh
-        run: npm run lint
+        run: |
+          npm.cmd run lint
+          if ($LASTEXITCODE -ne 0) { throw "Lint failed with exit code $LASTEXITCODE" }
+
+      - name: Build application with non-secret CI placeholders
+        shell: pwsh
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://ci.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role-key
+          OPENAI_API_KEY: sk-ci-placeholder-not-a-real-key
+          TWILIO_ACCOUNT_SID: AC00000000000000000000000000000000
+          TWILIO_AUTH_TOKEN: ci-placeholder-auth-token
+          TWILIO_PHONE_NUMBER: "+15555550100"
+        run: |
+          npm.cmd run build
+          if ($LASTEXITCODE -ne 0) { throw "npm build failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath .next/BUILD_ID -PathType Leaf)) {
+            throw "Next.js build did not produce .next/BUILD_ID"
+          }
 
       - name: Verify tracked source is unchanged
         shell: pwsh
         run: |
           $dirty = git status --porcelain --untracked-files=no
+          if ($LASTEXITCODE -ne 0) {
+            throw "git status failed with exit code $LASTEXITCODE"
+          }
           if ($dirty) {
             throw "Validation changed tracked source: $dirty"
           }
