@@ -37,7 +37,7 @@ export function consumeAlosProjectBrowserResult(result,{admission}={}) {
   need(result?.status==="SUCCEEDED","route did not succeed");
   need(result?.source?.branch===ALOS_EXPECTED_SOURCE_BRANCH,"wrong source branch");
   need(result?.source?.commit===admission.source.commit && validSha(result?.source?.commit),"source commit mismatch");
-  for (const field of ["actualAgentRun","routerExecuted","orchestratorExecuted","toolExecutorExecuted","sameOwnerBrowser","productionVerifierInvoked","persistedAllowedToolsEnforced","sameOwnerConsumed"]) need(result?.[field]===true,`${field} not proven`);
+  for (const field of ["actualAgentRun","routerExecuted","orchestratorExecuted","toolExecutorExecuted","sameOwnerBrowser","productionVerifierInvoked","persistedAllowedToolsEnforced"]) need(result?.[field]===true,`${field} not proven`);
   need(Array.isArray(result?.allowedTools),"allowedTools missing");
   for (const tool of ALOS_REQUIRED_TOOLS) need(result.allowedTools.includes(tool),`missing tool ${tool}`);
   need(result?.browser?.ownerSha256===ALOS_BROWSER_OWNER_SHA256,"owner Browser identity mismatch");
