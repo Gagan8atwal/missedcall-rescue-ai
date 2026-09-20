@@ -1,0 +1,14 @@
+{
+  "schema": "alos.microvm-project.v1",
+  "mode": "cycle",
+  "verify": [
+    [
+      "npm",
+      "run",
+      "type-check"
+    ]
+  ],
+  "env": {
+    "NODE_ENV": "test"
+  }
+}
