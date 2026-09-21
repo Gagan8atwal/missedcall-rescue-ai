@@ -53,5 +53,20 @@
     "replacement-browser",
     "replacement-router"
   ],
-  "consumerPath": ".alos/zero-key-consumer.mjs"
+  "consumerPath": ".alos/zero-key-consumer.mjs",
+  "durableExecution": {
+    "interface": "alos.durable-execution.v1",
+    "provider": "temporal",
+    "ownerRepository": "Gagan8atwal/al-solutions-command-center",
+    "ownerAdapter": "alos/capabilities/temporal-runtime/src/project-adapters/missedcall-rescue-ai.mjs",
+    "operation": "missed-call-recovery-workflow",
+    "externalCredentialRequired": false,
+    "hostedTemporalCloudAllowed": false,
+    "paidFallbackAllowed": false,
+    "maxPaidCostUsd": 0,
+    "failClosed": true,
+    "requireFailureRecoveryEvidence": true,
+    "requireDownstreamReceipt": true,
+    "requireRepeatExecution": true
+  }
 }
