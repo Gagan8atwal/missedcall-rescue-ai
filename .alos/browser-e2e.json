@@ -1,0 +1,51 @@
+{
+  "schema": "alos.browser-e2e-spec.v1",
+  "projectKey": "missedcall-rescue-ai",
+  "runner": "Gagan8atwal/al-solutions-command-center:alos/runtime/project-browser-acceptance.ts",
+  "sideEffects": "forbidden",
+  "acceptance": {
+    "requireTwoDisjointSessions": true,
+    "requireCorrelatedEvidenceEveryAction": true,
+    "requireExactPinnedSource": true,
+    "requireSameOwnerConsumption": true,
+    "maxPaidCostUsd": 0
+  },
+  "journeys": [
+    {
+      "label": "mobile-rescue-flow-proof",
+      "width": 390,
+      "height": 844,
+      "startPagePath": "/",
+      "expectText": "MissedCall Rescue AI — ALOS Integration",
+      "steps": [
+        {
+          "type": "click",
+          "match": "Verify rescue flow",
+          "expectText": "RESCUE:VERIFIED"
+        },
+        {
+          "type": "snapshot",
+          "expectText": "does not place calls, send SMS"
+        }
+      ]
+    },
+    {
+      "label": "desktop-safety-gate-proof",
+      "width": 1440,
+      "height": 900,
+      "startPagePath": "/",
+      "expectText": "Side-effect-free owner fixture",
+      "steps": [
+        {
+          "type": "click",
+          "match": "Inspect safety gate",
+          "expectText": "SAFETY:VERIFIED"
+        },
+        {
+          "type": "snapshot",
+          "expectText": "SAFETY:VERIFIED"
+        }
+      ]
+    }
+  ]
+}
